@@ -32,6 +32,40 @@ Before a sync, freeze all available source HEADs, branches, worktree changes and
 
 Cover all four relationships when asked for a complete sync: the two apps, the two CLIs, Mole CLI (macOS) with Mole Mac, and Mole CLI (Windows) with Mole for Windows. Safety and correctness contracts transfer only after checking the destination's real consumer; platform APIs, GUI-only capabilities and private catalogs do not transfer automatically. No version bump, release, private-source disclosure or feature expansion is authorized merely by recording a row. Update the affected record and its source references in the same task, then verify every renamed path/link and report the remaining queue.
 
+## SwiftUI adapter contract
+
+Maintainer decisions, 2026-10-21: build a separate SwiftUI shell in `macos/`, with local build tooling in `script/`. Preserve upstream CLI files and behavior. This shell is distinct from the existing Mole Mac product. The GUI only maps UX actions to public CLI commands and structured output; do not duplicate cleanup, protection, sizing, uninstall or maintenance policies in Swift.
+
+- Every eventual feature surface must use native SwiftUI. Do not embed terminals, parse TUI frames, simulate keystrokes, or bypass CLI guards with direct filesystem actions.
+- Prefer the user's installed Mole only when its stable version exactly matches `macos/Compatibility.json`. Otherwise use the bundled version. Unknown, older, newer and nightly versions are incompatible. If the bundled CLI cannot be verified, fail visibly. Never retry an operation with another CLI after execution fails.
+- Bundle unchanged scripts and Go helpers built from the reviewed source. Keep a version/source receipt in `macos/Compatibility.json`; periodically sync upstream manually and revalidate the adapter. Do not introduce a scheduler, runtime update, release or installer as part of synchronization.
+- Missing interfaces are skipped and recorded below, then discussed with the maintainer. Do not add upstream flags, parse prose, or create GUI-side business logic to fill a gap without that discussion.
+- Use macOS SwiftUI, SwiftPM and build/run skills as applicable. Build with `./script/build_and_run.sh`; test the independent adapter with `swift test --package-path macos`. Require execution-time CLI identity/version validation before adding future destructive actions.
+- UI design follows `emil-design-eng` as the primary craft guide and the macOS `liquid-glass` skill for native materials and controls. Target macOS 26+, keep typography/spacing coherent, preserve instant navigation and keyboard actions, and avoid ornamental motion or glass on every content card. Verify the actual app window after visual changes.
+- Maintainer visual correction: no green theme, no repeated explanatory subtitles, and no custom rounded cards, icon tiles or badges. Use neutral content, system accent controls, aligned sections, separators and whitespace. Retain only useful data, action labels, brief availability states and actionable errors; keep detailed interface-gap explanations in this file.
+
+### Interface gap registry
+
+Reviewed against `84dc779dc651ff1f0509a2054b6e25b8fb5d2ac5` (1.62.0). All pending rows require a fresh check of the named public consumer during the next upstream sync; an implemented read-only view does not establish complete feature parity.
+
+| Feature / consumer | Current native coverage | Pending interface and disposition |
+| --- | --- | --- |
+| Status, `cmd/status/main.go` | `status --json`: snapshots, CPU/memory/disk cards, battery/network, processes and all JSON fields | Live `--watch` streaming and specialized metric drill-down deferred; a machine interface already exists. |
+| Analyze, `cmd/analyze/json.go` | `analyze --json`: overview, folder navigation, large files, scan states | TUI Trash operations have no separate public action endpoint; deletion skipped. |
+| Uninstall, `bin/uninstall.sh` | `uninstall --list`: native app inventory | Removal plan, personal-data selection, confirmation and result need a structured non-TTY contract; actions skipped. Dry-run prose is not parsed. |
+| Clean, `bin/clean.sh` | Native pending destination | `--dry-run` exposes prose and a path list, not a complete typed plan/result; cleanup, external-volume cleanup and whitelist editing skipped. |
+| Purge, `bin/purge.sh` | Native pending destination | No structured candidate/selection/result contract; `--yes` cannot substitute for a reviewed native plan; actions and path editor skipped. |
+| Installer, `bin/installer.sh` | Native pending destination | Selection and results depend on terminal interaction; skipped. |
+| Optimize, `bin/optimize.sh` | Native pending destination | No structured task plan/authorization/result contract; actions and whitelist editor skipped. |
+| Slim, `bin/slim.sh` | Native pending destination | Preview, selection and verified swap results lack a complete structured public contract; skipped. |
+| History, `bin/history.sh` | `history --json --limit 200`: sessions, actions, attribution, deletions, log paths | No full-log pagination endpoint; the current view explicitly states its limit. |
+| Touch ID, `bin/touchid.sh` | Native pending destination | Needs reviewed native authorization and configuration-state/result adapter; skipped. |
+| Completion, `bin/completion.sh` | Native pending destination | Existing script generation interface does exist; native configuration workflow is deferred, do not invent installation state or shell-profile edits. |
+| Update, `lib/manage/update.sh` | Native pending destination | No structured update plan/progress/result contract; skipped. Never update bundled read-only app resources through `mo update`. |
+| Remove, `lib/manage/remove.sh` | Native pending destination | No structured removal plan/confirmation/result contract; skipped. Never run this against bundled resources. |
+
+Development setup, capability details and sync workflow: [macos/README.md](macos/README.md).
+
 ## Project
 
 Mole is a macOS system cleanup and optimization tool with shell and Go components. It performs file cleanup, app protection checks, and maintenance tasks, so safety rules matter more than speed.

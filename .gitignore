@@ -93,3 +93,9 @@ mole_guidelines.md
 # Nix build output symlinks
 /result
 /result-*
+
+# Independent SwiftUI adapter build products
+/macos/.build/
+/macos/.swiftpm/
+/dist/
+__pycache__/
