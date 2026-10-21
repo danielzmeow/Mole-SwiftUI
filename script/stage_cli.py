@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Stage an unchanged, version-pinned CLI into a local development app bundle."""
+"""Stage a version-pinned CLI with explicitly hashed local interface extensions."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -16,10 +17,22 @@ def main():
     contract_path = ROOT / "macos" / "Compatibility.json"
     contract = json.loads(contract_path.read_text())
     # Do not silently pair a new checkout/working tree with an old Adapter contract.
-    subprocess.run([
-        "git", "diff", "--exit-code", contract["sourceCommit"], "--",
-        "mole", "mo", "bin", "lib", "cmd", "internal", "go.mod", "go.sum",
-    ], cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
+    source_roots = ["mole", "mo", "bin", "lib", "cmd", "internal", "go.mod", "go.sum"]
+    overrides = contract.get("sourceOverrides", {})
+    changed = subprocess.check_output([
+        "git", "diff", "--name-only", contract["sourceCommit"], "--", *source_roots,
+    ], cwd=ROOT).decode().splitlines()
+    untracked = subprocess.check_output([
+        "git", "ls-files", "--others", "--exclude-standard", "--", *source_roots,
+    ], cwd=ROOT).decode().splitlines()
+    if set(changed + untracked) - overrides.keys():
+        raise RuntimeError("Unreviewed CLI source drift; update the source receipt after review.")
+    for name, expected in overrides.items():
+        path = ROOT / name
+        if name not in changed + untracked or path.is_symlink() or not path.is_file():
+            raise RuntimeError(f"Invalid CLI source override: {name}")
+        if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+            raise RuntimeError(f"CLI source override changed since review: {name}")
     version_line = f'VERSION="{contract["version"]}"'
     if version_line not in (ROOT / "mole").read_text().splitlines():
         raise RuntimeError("Update macos/Compatibility.json after reviewing the upstream interface changes.")
@@ -28,7 +41,7 @@ def main():
     paths = subprocess.check_output([
         "git", "ls-files", "-z", "--", "mole", "mo", "bin", "lib", "LICENSE"
     ], cwd=ROOT).decode().split("\0")
-    for name in filter(None, paths):
+    for name in sorted(set(filter(None, paths)) | overrides.keys()):
         destination = cli / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / name, destination)

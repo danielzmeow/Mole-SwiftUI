@@ -131,3 +131,93 @@ private let contract = CLICompatibility(version: "1.62.0", sourceCommit: "fixtur
         try CLIResponses.decode(Analysis.self, from: Data("Progress... {}".utf8))
     }
 }
+
+@Test func cleanPreviewRejectsUnsupportedContractsAndPreservesUnknownAndCoveredSizes() throws {
+    let json = #"{"schema_version":2,"created_at":1,"command":"clean","mode":"preview","coverage":"path_candidates","execution_supported":true,"system_included":false,"size_partial":true,"total_size_bytes":2048,"total_items":1,"entries":[{"path":"/tmp/缓存\n\"name","section":"User essentials","size_bytes":null,"item_count":1,"counted_under":"/tmp"}]}"#
+    let preview = try CleanPreview.decode(Data(json.utf8))
+    #expect(preview.sizePartial)
+    #expect(!preview.systemIncluded)
+    #expect(preview.entries.first?.sizeBytes == nil)
+    #expect(preview.entries.first?.countedUnder == "/tmp")
+    #expect(preview.entries.first?.path == "/tmp/缓存\n\"name")
+    for invalid in [json.replacingOccurrences(of: "\"schema_version\":2", with: "\"schema_version\":3"),
+                    json.replacingOccurrences(of: "\"execution_supported\":true", with: "\"execution_supported\":false"),
+                    json.replacingOccurrences(of: "\"total_size_bytes\":2048", with: "\"total_size_bytes\":-1")] {
+        #expect(throws: AdapterError.self) { try CleanPreview.decode(Data(invalid.utf8)) }
+    }
+    #expect(CLIRequest.cleanPreview.arguments == ["clean", "--dry-run", "--json"])
+}
+
+@Test func matchingVersionWithoutPreviewCapabilityIsRejectedBeforeSelection() async throws {
+    let fixture = try Fixture(); defer { fixture.remove() }
+    let capability = #"{"schema_version":1,"command":"clean","mode":"preview","coverage":"path_candidates","execution_supported":false}"#
+    let body = "if [[ $1 == --version ]]; then echo 'Mole version 1.62.0'; else printf '%s\\n' '\(capability)'; fi"
+    let bundled = try fixture.executable("bundled", body: body)
+    let old = try fixture.executable("old-same-version", body: "if [[ $1 == --version ]]; then echo 'Mole version 1.62.0'; else echo unsupported >&2; exit 1; fi")
+    let contract = CLICompatibility(version: "1.62.0", sourceCommit: "fixture", cleanPreviewSchema: 1)
+    let selected = try await CLIResolver().resolve(compatibility: contract, bundled: bundled, candidates: [old])
+    #expect(selected.origin == .bundled)
+    let supported = try fixture.executable("supported", body: body)
+    let installed = try await CLIResolver().resolve(compatibility: contract, bundled: bundled, candidates: [supported])
+    #expect(installed.origin == .installed)
+    await #expect(throws: (any Error).self) {
+        try await CLIResolver().resolve(compatibility: contract, bundled: old, candidates: [])
+    }
+}
+
+@Test func selectedCleanupPinsLauncherAndPoliciesBeforeExecuting() async throws {
+    let fixture = try Fixture(); defer { fixture.remove() }
+    let manager = FileManager.default
+    try manager.createDirectory(at: fixture.directory.appendingPathComponent("bin"), withIntermediateDirectories: true)
+    try manager.createDirectory(at: fixture.directory.appendingPathComponent("lib"), withIntermediateDirectories: true)
+    let policy = fixture.directory.appendingPathComponent("bin/clean.sh")
+    try "reviewed policy".write(to: policy, atomically: true, encoding: .utf8)
+    let marker = fixture.directory.appendingPathComponent("executed")
+    let capability = "{\"schema_version\":2,\"command\":\"clean\",\"mode\":\"preview\",\"coverage\":\"path_candidates\",\"execution_supported\":true,\"source_root\":\"\(fixture.directory.path)\"}"
+    let script = try fixture.executable("mole", body: """
+    if [[ $1 == --version ]]; then echo 'Mole version 1.62.0'
+    elif [[ $3 == --help ]]; then printf '%s\\n' '\(capability)'
+    else /usr/bin/touch '\(marker.path)'; echo '{"schema_version":2,"command":"clean","mode":"selection_result","interrupted":false,"results":[]}'
+    fi
+    """)
+    let contract = CLICompatibility(version: "1.62.0", sourceCommit: "fixture", cleanPreviewSchema: 2)
+    let selection = try await CLIResolver().resolve(compatibility: contract, bundled: script, candidates: [])
+    #expect(selection.identity != nil)
+    let runner = ProcessRunner()
+    let request = fixture.directory.appendingPathComponent("selection.json")
+    let result = try await runner.clean(selection: selection, file: request, compatibility: contract)
+    #expect(try CleanResult.decode(result.data).results.isEmpty)
+    #expect(manager.fileExists(atPath: marker.path))
+    try manager.removeItem(at: marker)
+    try "changed policy".write(to: policy, atomically: true, encoding: .utf8)
+    await #expect(throws: AdapterError.self) {
+        try await runner.clean(selection: selection, file: request, compatibility: contract)
+    }
+    #expect(!manager.fileExists(atPath: marker.path))
+    await #expect(throws: AdapterError.self) {
+        try await runner.run(executable: script, request: .cleanSelection(file: request.path))
+    }
+    #expect(!manager.fileExists(atPath: marker.path))
+}
+
+@Test func selectedCleanupResultsMustAccountForEverySelectedPathExactlyOnce() throws {
+    let json = #"{"schema_version":2,"command":"clean","mode":"selection_result","interrupted":false,"results":[{"path":"/tmp/a","status":"removed","reason":"completed"},{"path":"/tmp/b","status":"retained","reason":"not_eligible"}]}"#
+    let result = try CleanResult.decode(Data(json.utf8))
+    try result.validate(selectedPaths: ["/tmp/a", "/tmp/b"])
+    #expect(throws: AdapterError.self) { try result.validate(selectedPaths: ["/tmp/a"]) }
+    #expect(throws: AdapterError.self) { try result.validate(selectedPaths: ["/tmp/a", "/tmp/c"]) }
+    let duplicate = try CleanResult.decode(Data(json.replacingOccurrences(of: "/tmp/b", with: "/tmp/a").utf8))
+    #expect(throws: AdapterError.self) { try duplicate.validate(selectedPaths: ["/tmp/a", "/tmp/b"]) }
+}
+
+@Test func destructiveTimeoutRequiresRescanningRatherThanRetryingTheSelection() async throws {
+    let fixture = try Fixture(); defer { fixture.remove() }
+    let script = try fixture.executable("slow", body: "/bin/sleep 10")
+    do {
+        _ = try await ProcessRunner().execute(executable: script, arguments: [], timeout: 0.02, mutation: true)
+        Issue.record("A timed-out cleanup must fail")
+    } catch {
+        #expect(error.localizedDescription.contains("重新扫描"))
+        #expect(!error.localizedDescription.contains("只读"))
+    }
+}

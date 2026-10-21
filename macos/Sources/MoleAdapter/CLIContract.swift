@@ -3,9 +3,11 @@ import Foundation
 public struct CLICompatibility: Codable, Sendable {
     public let version: String
     public let sourceCommit: String
-    public init(version: String, sourceCommit: String) {
+    public let cleanPreviewSchema: Int?
+    public init(version: String, sourceCommit: String, cleanPreviewSchema: Int? = nil) {
         self.version = version
         self.sourceCommit = sourceCommit
+        self.cleanPreviewSchema = cleanPreviewSchema
     }
 
     public func accepts(_ output: String) -> Bool {
@@ -18,9 +20,10 @@ public struct CLICompatibility: Codable, Sendable {
     }
 }
 
-/// Only commands with a reviewed, read-only machine interface can be constructed.
+/// Public structured requests. Destructive selection requires an additional identity gate.
 public enum CLIRequest: Sendable, Equatable {
-    case version, status, analyze(path: String?), applications, history
+    case version, status, analyze(path: String?), applications, history, cleanPreview, cleanPreviewHelp
+    case cleanSelection(file: String)
 
     public var arguments: [String] {
         switch self {
@@ -29,15 +32,19 @@ public enum CLIRequest: Sendable, Equatable {
         case .analyze(let path): ["analyze", "--json"] + (path.map { [$0] } ?? [])
         case .applications: ["uninstall", "--list"]
         case .history: ["history", "--json", "--limit", "200"]
+        case .cleanPreview: ["clean", "--dry-run", "--json"]
+        case .cleanPreviewHelp: ["clean", "--json", "--help"]
+        case .cleanSelection(let file): ["clean", "--json", "--apply-selection", file]
         }
     }
 
     public var timeout: TimeInterval {
         switch self {
-        case .version: 10
+        case .version, .cleanPreviewHelp: 10
         case .status: 45
         case .analyze, .applications: 180
         case .history: 30
+        case .cleanPreview, .cleanSelection: 600
         }
     }
 }
@@ -48,6 +55,7 @@ public struct CLISelection: Sendable, Equatable {
     public let origin: Origin
     public let version: String
     public let explanation: String
+    public let identity: CLIIdentity?
 }
 
 public struct CLIResolver: Sendable {
@@ -73,18 +81,37 @@ public struct CLIResolver: Sendable {
             do {
                 let result = try await runner.run(executable: executable, request: .version)
                 if compatibility.accepts(result.text) {
+                    let identity = try await verifyPreviewInterface(executable, compatibility: compatibility)
                     return CLISelection(executable: executable, origin: .installed,
-                        version: compatibility.version, explanation: "使用已安装且版本匹配的 Mole。")
+                        version: compatibility.version, explanation: "使用已安装且版本匹配的 Mole。", identity: identity)
                 }
                 rejected.append("\(executable.path)：版本不匹配")
             } catch is CancellationError { throw CancellationError() }
-            catch { rejected.append("\(executable.path)：无法验证版本") }
+            catch { rejected.append("\(executable.path)：无法验证版本或清理预览接口") }
         }
         let result = try await runner.run(executable: bundled, request: .version)
         guard compatibility.accepts(result.text) else {
             throw AdapterError.message("内置 CLI 与适配版本不一致，请重新构建 App。")
         }
+        let identity = try await verifyPreviewInterface(bundled, compatibility: compatibility)
         return CLISelection(executable: bundled, origin: .bundled, version: compatibility.version,
-            explanation: rejected.isEmpty ? "未找到已安装的 Mole，使用内置版本。" : rejected.joined(separator: "\n") + "\n已回退到内置版本。")
+            explanation: rejected.isEmpty ? "未找到已安装的 Mole，使用内置版本。" : rejected.joined(separator: "\n") + "\n已回退到内置版本。", identity: identity)
     }
+
+    private func verifyPreviewInterface(_ executable: URL, compatibility: CLICompatibility) async throws -> CLIIdentity? {
+        guard let schema = compatibility.cleanPreviewSchema else { return nil }
+        let result = try await runner.run(executable: executable, request: .cleanPreviewHelp)
+        let capability = try JSONDecoder().decode(CleanPreviewCapability.self, from: result.data)
+        guard capability.schemaVersion == schema, capability.command == "clean",
+              capability.mode == "preview", capability.coverage == "path_candidates",
+              (schema < 2 || capability.executionSupported) else {
+            throw AdapterError.message("CLI 不支持已验证的清理预览接口，请重新构建 App。")
+        }
+        guard schema >= 2 else { return nil }
+        guard let root = capability.sourceRoot, root.hasPrefix("/") else {
+            throw AdapterError.message("CLI 没有返回可验证的源目录。")
+        }
+        return try CLIIdentity.capture(executable: executable, sourceRoot: URL(fileURLWithPath: root))
+    }
+
 }

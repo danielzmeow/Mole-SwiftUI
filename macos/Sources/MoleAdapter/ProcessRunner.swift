@@ -26,22 +26,41 @@ public struct ProcessRunner: Sendable {
     public init(outputLimit: Int = 32 * 1024 * 1024) { self.outputLimit = outputLimit }
 
     public func run(executable: URL, request: CLIRequest) async throws -> CLIResult {
-        try await execute(executable: executable, arguments: request.arguments, timeout: request.timeout)
+        if case .cleanSelection = request {
+            throw AdapterError.message("清理执行必须先验证 CLI 身份。")
+        }
+        return try await execute(executable: executable, arguments: request.arguments, timeout: request.timeout)
+    }
+
+    public func clean(selection: CLISelection, file: URL, compatibility: CLICompatibility) async throws -> CLIResult {
+        guard let identity = selection.identity else { throw AdapterError.message("CLI 未通过清理身份验证，请重新连接。") }
+        try identity.validate(executable: selection.executable)
+        let version = try await run(executable: selection.executable, request: .version)
+        guard compatibility.accepts(version.text) else { throw AdapterError.message("CLI 版本已变化，请重新连接并扫描。") }
+        let capability = try await run(executable: selection.executable, request: .cleanPreviewHelp)
+        let contract = try JSONDecoder().decode(CleanPreviewCapability.self, from: capability.data)
+        guard contract.schemaVersion == 2, contract.executionSupported else {
+            throw AdapterError.message("CLI 清理接口已变化，请重新连接并扫描。")
+        }
+        try Task.checkCancellation()
+        try identity.validate(executable: selection.executable)
+        let request = CLIRequest.cleanSelection(file: file.path)
+        return try await execute(executable: selection.executable, arguments: request.arguments, timeout: request.timeout, mutation: true)
     }
 
     // Internal so tests can exercise timeout/cancellation with harmless fixtures.
-    func execute(executable: URL, arguments: [String], timeout: TimeInterval) async throws -> CLIResult {
+    func execute(executable: URL, arguments: [String], timeout: TimeInterval, mutation: Bool = false) async throws -> CLIResult {
         let flag = CancellationFlag()
         return try await withTaskCancellationHandler {
             try Task.checkCancellation()
             return try await Task.detached(priority: .userInitiated) {
-                try collect(executable: executable, arguments: arguments, timeout: timeout, flag: flag)
+                try collect(executable: executable, arguments: arguments, timeout: timeout, mutation: mutation, flag: flag)
             }.value
         } onCancel: { flag.cancel() }
     }
 
     private func collect(executable: URL, arguments: [String], timeout: TimeInterval,
-                         flag: CancellationFlag) throws -> CLIResult {
+                         mutation: Bool, flag: CancellationFlag) throws -> CLIResult {
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
             throw AdapterError.message("CLI 不存在或不可执行：\(executable.path)")
         }
@@ -105,7 +124,7 @@ public struct ProcessRunner: Sendable {
         while true {
             if flag.cancelled { throw CancellationError() }
             if ProcessInfo.processInfo.systemUptime >= deadline {
-                throw AdapterError.message("CLI 读取超时，未取得完整结果。可以重试此只读操作。")
+                throw AdapterError.message(mutation ? "清理执行超时，请查看操作历史并重新扫描，勿重复执行原选择。" : "CLI 读取超时，未取得完整结果。可以重试此只读操作。")
             }
             try drain(out[0], into: &stdout)
             try drain(err[0], into: &stderr)

@@ -10,9 +10,7 @@ struct ContentView: View {
     var body: some View {
         NavigationSplitView {
             List(selection: $feature) {
-                Section("我的 Mac") { rows([.status, .analyze, .uninstall, .history]) }
-                Section("维护工具") { rows([.clean, .purge, .installer, .optimize, .slim]) }
-                Section("更多") { rows([.touchid, .completion, .update, .remove]) }
+                rows(Feature.allCases)
             }
             .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 190, ideal: 210, max: 260)
@@ -105,9 +103,9 @@ struct ContentView: View {
                 ProgressView().controlSize(.small)
                 Text(model.activity).foregroundStyle(.secondary)
                 Spacer()
-                Button("取消") { model.cancel() }
+                Button(model.isCleaning ? "停止" : "取消") { model.cancel() }
                     .buttonStyle(.borderless)
-                    .help("取消读取 (⌘.)")
+                    .help(model.isCleaning ? "停止清理，已完成的操作不会撤销 (⌘.)" : "取消读取 (⌘.)")
             }
             .font(.callout)
             .padding(.horizontal, Metrics.pagePadding).padding(.vertical, 8)
@@ -133,7 +131,8 @@ struct ContentView: View {
             case .analyze: AnalysisView(model: model)
             case .uninstall: ApplicationsView(model: model)
             case .history: HistoryView(model: model)
-            case let pending: PendingFeatureView(feature: pending)
+            case .clean: CleanView(model: model)
+            case .optimize: PendingFeatureView(feature: .optimize)
             }
         }
     }
