@@ -28,6 +28,8 @@ source "$SCRIPT_DIR/../lib/clean/hints.sh"
 source "$SCRIPT_DIR/../lib/clean/system.sh"
 source "$SCRIPT_DIR/../lib/clean/user.sh"
 
+CLEAN_APPLY_FILE=""
+CLEAN_JSON=false
 SYSTEM_CLEAN=false
 DRY_RUN=false
 if [[ "${MOLE_DRY_RUN:-0}" == "1" ]]; then
@@ -81,7 +83,10 @@ prepare_clean_preview_file() {
     CLEAN_PREVIEW_STAGING_FILE=""
     CLEAN_PREVIEW_LEDGER_FILE=""
 
-    if is_root_user && [[ -n "${SUDO_USER:-}" && "${SUDO_USER:-}" != "root" ]]; then
+    if [[ "${CLEAN_JSON:-false}" == "true" ]]; then
+        # Machine previews never overwrite the user-facing text preview.
+        EXPORT_LIST_FILE=$(create_temp_file) || return 1
+    elif is_root_user && [[ -n "${SUDO_USER:-}" && "${SUDO_USER:-}" != "root" ]]; then
         ensure_mole_temp_root || return 1
         local root_temp_dir="$MOLE_RESOLVED_TMPDIR"
 
@@ -103,6 +108,7 @@ run_clean_preview_as_invoking_user() {
 }
 
 publish_clean_preview_file() {
+    [[ "${CLEAN_JSON:-false}" != "true" ]] || return 0
     [[ -n "$CLEAN_PREVIEW_STAGING_FILE" ]] || return 0
     [[ -f "$CLEAN_PREVIEW_STAGING_FILE" && ! -L "$CLEAN_PREVIEW_STAGING_FILE" && -O "$CLEAN_PREVIEW_STAGING_FILE" ]] || return 1
     [[ -n "${SUDO_USER:-}" && "${SUDO_USER:-}" != "root" ]] || return 1
@@ -809,6 +815,10 @@ classify_cleanup_risk() {
     echo "MEDIUM|User data files"
 }
 
+record_safe_clean_preview_target() {
+    record_dry_run_cleanup_target "$1" "$2" "$3" "$4"
+}
+
 # Internal implementation shared by the normal and process-guarded cleanup
 # entry points. The first argument is an optional callback that must return 0
 # immediately before each deletion sink; callers use it to bind a process-state
@@ -1239,8 +1249,8 @@ _safe_clean_impl() {
                             fi
                         fi
                         action_rc=0
-                        record_dry_run_cleanup_target \
-                            "$path" "$size" 1 true || action_rc=$?
+                        record_safe_clean_preview_target \
+                            "$path" "$size" 1 true "$delete_guard" "$section_deadline" || action_rc=$?
                         if mole_rc_timeout_or_signal "$action_rc"; then
                             cleanup_interrupt_rc=$action_rc
                             break
@@ -1357,8 +1367,8 @@ _safe_clean_impl() {
                         fi
                     fi
                     action_rc=0
-                    record_dry_run_cleanup_target \
-                        "$path" "$size_kb" 1 true || action_rc=$?
+                    record_safe_clean_preview_target \
+                        "$path" "$size_kb" 1 true "$delete_guard" "$section_deadline" || action_rc=$?
                     if mole_rc_timeout_or_signal "$action_rc"; then
                         cleanup_interrupt_rc=$action_rc
                         break
@@ -1471,7 +1481,11 @@ start_cleanup() {
     MOLE_CLEAN_REMOVAL_TIMEOUT_PATHS=""
     export MOLE_CLEAN_REMOVAL_TIMEOUT_PATHS
     _MOLE_CLEAN_SECTION_DEADLINE=""
-    log_operation_session_start "clean"
+    if [[ -n "${CLEAN_APPLY_FILE:-}" ]]; then
+        MOLE_DRY_RUN=0 log_operation_session_start "clean"
+    else
+        log_operation_session_start "clean"
+    fi
     DRY_RUN_SEEN_IDENTITIES=()
     DRY_RUN_TOTAL_PARTIAL=false
 
@@ -1695,6 +1709,9 @@ perform_cleanup() {
         local pending_clean_cancel="${MOLE_CLEAN_CANCEL_STATUS:-0}"
         if mole_rc_timeout_or_signal "$pending_clean_cancel"; then
             return "$pending_clean_cancel"
+        fi
+        if [[ -n "${CLEAN_APPLY_FILE:-}" && -f "$CLEAN_NATIVE_STATE/cancelled" ]]; then
+            return 130
         fi
         local step_name="${1:-cleanup step}"
         local _perf_step_start
@@ -2062,7 +2079,9 @@ perform_cleanup() {
     fi
 
     # Log session end with summary
-    log_operation_session_end "clean" "$files_cleaned" "$total_size_cleaned"
+    if [[ -z "${CLEAN_APPLY_FILE:-}" ]]; then
+        log_operation_session_end "clean" "$files_cleaned" "$total_size_cleaned"
+    fi
 
     print_summary_block "$summary_heading" "${summary_details[@]}"
     printf '\n'
@@ -2108,11 +2127,32 @@ run_cloud_and_office_cleanup() {
 }
 
 main() {
+    local argument
+    for argument in "$@"; do
+        [[ "$argument" != "--json" ]] || CLEAN_JSON=true
+    done
+    if [[ "$CLEAN_JSON" == "true" ]]; then
+        source "$SCRIPT_DIR/../lib/clean/preview_json.sh"
+        source "$SCRIPT_DIR/../lib/clean/selection.sh"
+    fi
     while [[ $# -gt 0 ]]; do
         case "$1" in
             "--help" | "-h")
-                show_clean_help
+                if [[ "$CLEAN_JSON" == "true" ]]; then
+                    clean_preview_json_help
+                else
+                    show_clean_help
+                fi
                 exit 0
+                ;;
+            "--json") ;;
+            "--apply-selection")
+                shift
+                if [[ "$CLEAN_JSON" != "true" || $# -eq 0 ]]; then
+                    echo "Selected cleanup requires --json --apply-selection FILE. Scan and review a native selection first." >&2
+                    exit 1
+                fi
+                CLEAN_APPLY_FILE="$1"
                 ;;
             "--debug")
                 export MO_DEBUG=1
@@ -2122,6 +2162,10 @@ main() {
                 export MOLE_DRY_RUN=1
                 ;;
             "--external")
+                if [[ "$CLEAN_JSON" == "true" ]]; then
+                    echo "JSON preview does not support external volumes. Run mo clean --dry-run --json." >&2
+                    exit 1
+                fi
                 shift
                 if [[ $# -eq 0 ]]; then
                     echo "Missing path for --external" >&2
@@ -2130,6 +2174,10 @@ main() {
                 EXTERNAL_VOLUME_TARGET=$(validate_external_volume_target "$1") || exit 1
                 ;;
             "--whitelist")
+                if [[ "$CLEAN_JSON" == "true" ]]; then
+                    echo "JSON preview does not support whitelist editing. Run mo clean --whitelist separately." >&2
+                    exit 1
+                fi
                 source "$SCRIPT_DIR/../lib/manage/whitelist.sh"
                 manage_whitelist "clean"
                 exit 0
@@ -2152,6 +2200,36 @@ main() {
         esac
         shift
     done
+
+    if [[ "$CLEAN_JSON" == "true" ]]; then
+        if [[ ("$DRY_RUN" != "true" && -z "$CLEAN_APPLY_FILE") ||
+            ("$DRY_RUN" == "true" && -n "$CLEAN_APPLY_FILE") || -n "$EXTERNAL_VOLUME_TARGET" ]]; then
+            echo "JSON output supports the default dry-run preview only. Run mo clean --dry-run --json." >&2
+            exit 1
+        fi
+        if ! /usr/bin/perl -MJSON::PP -MEncode -e 1; then
+            echo "JSON preview requires system Perl with JSON::PP and Encode. Restore these macOS components before retrying." >&2
+            exit 1
+        fi
+        prepare_native_clean_selection || exit $?
+        if [[ -n "$CLEAN_APPLY_FILE" ]]; then
+            # Only the exact guarded native seam below can mutate. Owner tools,
+            # direct-removal callers and the rest of discovery stay in dry-run.
+            DRY_RUN=true
+            export MOLE_DRY_RUN=1
+        fi
+        start_cleanup >&2 || exit $?
+        local preview_rc=0
+        perform_cleanup >&2 || preview_rc=$?
+        if [[ -n "$CLEAN_APPLY_FILE" ]]; then
+            if [[ -f "$CLEAN_NATIVE_STATE/cancelled" && $preview_rc -eq 0 ]]; then preview_rc=130; fi
+            emit_native_clean_result "$preview_rc"
+            exit $?
+        fi
+        [[ "$preview_rc" -eq 0 ]] || exit "$preview_rc"
+        emit_clean_preview_json
+        exit $?
+    fi
 
     start_cleanup
     hide_cursor

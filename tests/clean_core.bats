@@ -2297,3 +2297,29 @@ _sim_runtime_size_kb "$fixture" > /dev/null
 SCRIPT
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
+
+@test "mo clean JSON runs real discovery and preserves cache contents" {
+    set_mock_sudo_uncached
+    set_mock_host_toolchains
+    local cache="$HOME/Library/Caches/com.example.json-preview"
+    mkdir -p "$cache"
+    dd if=/dev/zero of="$cache/candidate.bin" bs=1024 count=64 2>/dev/null
+    # shellcheck disable=SC2016  # Expand paths only inside the fixture child shell.
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_MODE=0 MOLE_TEST_NO_AUTH=1 \
+        PATH="$TEST_MOCK_BIN:$MOCK_TOOLCHAIN_BIN:$PATH" bash -c \
+        '"$PROJECT_ROOT/mole" clean --dry-run --json > "$HOME/result.json" 2> "$HOME/diagnostics"'
+    [ "$status" -eq 0 ] || { cat "$HOME/diagnostics"; return 1; }
+    run python3 <<'PY'
+import json, os
+from pathlib import Path
+home = Path(os.environ['HOME'])
+p = json.loads((home/'result.json').read_text())
+cache = str(home/'Library/Caches/com.example.json-preview')
+assert p['coverage'] == 'path_candidates' and p['execution_supported']
+assert any(e['path'] == cache or e['path'].startswith(cache + '/') for e in p['entries'])
+assert p['total_size_bytes'] >= 65536
+assert (home/'Library/Caches/com.example.json-preview/candidate.bin').stat().st_size == 65536
+assert not (home/'.config/mole/clean-list.txt').exists()
+PY
+    [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+}

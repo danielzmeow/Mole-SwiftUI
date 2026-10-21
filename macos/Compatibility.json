@@ -1,0 +1,11 @@
+{
+  "version": "1.62.0",
+  "sourceCommit": "84dc779dc651ff1f0509a2054b6e25b8fb5d2ac5",
+  "cleanPreviewSchema": 2,
+  "sourceOverrides": {
+    "bin/clean.sh": "7f63d8373903dab9d34d721c3938b2b8ba938c31993d0d444c3708bdd43babf8",
+    "lib/core/help.sh": "606c4334baa5c2d3bb0b0adcdaed23b2db7f84f2f52128f6aecc97c412afc879",
+    "lib/clean/preview_json.sh": "1c0446a745534b4f4839c1d8e6236891523e95cf705be8e3ab974e03a934da77",
+    "lib/clean/selection.sh": "b1212cb51182366c522029fcdb1c4242e60caa7c3d4140643eda62cd5f05f801"
+  }
+}
